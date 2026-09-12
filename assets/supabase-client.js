@@ -11,7 +11,7 @@ import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js
 //    exponer en el frontend sin problema: la seguridad real la da RLS.
 // -----------------------------------------------------------------
 const SUPABASE_URL = 'https://vtwentiztmafllvlljgc.supabase.co';
-   const SUPABASE_ANON_KEY = 'sb_publishable_DkfpX-l96XZJvUWAB1X0dg_Eqpol-...'; 
+   const SUPABASE_ANON_KEY = 'sb_publishable_DkfpX-l96XZJvUWAB1XOdg_Eqpol-js'; 
 const ADMIN_EMAIL = 'hcanteros@gmail.com';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
