@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>💸 Movimientos — Finanzas Personales</title>
+<link rel="stylesheet" href="assets/shared.css">
+<style>
+  .badge { display:inline-block; padding:2px 9px; border-radius:20px; font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.4px; }
+  .badge-ingreso { background: var(--success-light); color: var(--success); }
+  .badge-egreso { background: var(--danger-light); color: var(--danger); }
+  .badge-transferencia { background: var(--accent-light); color: var(--accent); }
+  .filters { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+  .filters select { max-width: 190px; }
+  .amount-income { color: var(--income); font-weight:700; }
+  .amount-expense { color: var(--expense); font-weight:700; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><a href="index.html" class="back">← Menú</a></div>
+  <div id="userBadgeContainer"></div>
+</div>
+
+<div class="main">
+  <div class="page-header">
+    <div>
+      <h1>💸 Movimientos</h1>
+      <p>Ingresos, gastos y transferencias</p>
+    </div>
+    <button class="btn btn-primary admin-only" id="btnNuevo">+ Nuevo movimiento</button>
+  </div>
+
+  <div id="notice"></div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="filters">
+      <select id="filtCuenta"><option value="">Todas las cuentas</option></select>
+      <select id="filtCategoria"><option value="">Todas las categorías</option></select>
+      <select id="filtTipo">
+        <option value="">Todos los tipos</option>
+        <option value="ingreso">Ingreso</option>
+        <option value="egreso">Egreso</option>
+        <option value="transferencia">Transferencia</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Fecha</th><th>Tipo</th><th>Cuenta</th><th>Categoría</th><th>Descripción</th><th>Monto</th><th class="admin-only"></th>
+        </tr>
+      </thead>
+      <tbody id="tbodyMov"></tbody>
+    </table>
+    <div id="emptyState" class="empty hidden">
+      <div class="empty-icon">💸</div>
+      <p>No hay movimientos que coincidan con los filtros.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div id="modalMov" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:200;overflow:auto;padding:20px;">
+  <div class="card" style="width:100%;max-width:480px;">
+    <h3 id="modalTitle" style="margin-top:0;">Nuevo movimiento</h3>
+    <form id="formMov">
+      <input type="hidden" id="mId">
+      <div class="form-row">
+        <div class="field">
+          <label>Fecha</label>
+          <input type="date" id="mFecha" required>
+        </div>
+        <div class="field">
+          <label>Tipo</label>
+          <select id="mTipo">
+            <option value="egreso">Egreso</option>
+            <option value="ingreso">Ingreso</option>
+            <option value="transferencia">Transferencia</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label>Cuenta</label>
+          <select id="mCuenta" required></select>
+        </div>
+        <div class="field" id="mCuentaDestinoWrap" style="display:none;">
+          <label>Cuenta destino</label>
+          <select id="mCuentaDestino"></select>
+        </div>
+      </div>
+      <div class="field" id="mCategoriaWrap">
+        <label>Categoría</label>
+        <select id="mCategoria"></select>
+      </div>
+      <div class="field">
+        <label>Descripción</label>
+        <input type="text" id="mDescripcion" required placeholder="Ej: Supermercado, sueldo, etc.">
+      </div>
+      <div class="field">
+        <label>Monto</label>
+        <input type="number" id="mMonto" step="0.01" min="0.01" required>
+      </div>
+      <div class="field">
+        <label>Notas (opcional)</label>
+        <textarea id="mNotas" rows="2"></textarea>
+      </div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px;">
+        <button type="button" class="btn" id="btnCancelar">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module">
+import { supabase, requireAuth, renderUserBadge, applyReadOnlyMode } from './assets/supabase-client.js';
+
+const CATEGORIAS = [
+  'Alimentación','Transporte','Servicios','Salud','Educación','Entretenimiento',
+  'Ropa y Calzado','Vivienda','Tecnología','Inversiones','Tarjeta de Crédito',
+  'Sueldo','Freelance/Extra','Impuestos','Comisiones','Devoluciones',
+  'Internet','Teléfono','Otros'
+];
+
+let profile = null;
+let cuentas = [];
+let movimientos = [];
+
+function showToast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + type;
+  setTimeout(() => t.className = '', 2600);
+}
+
+function uid() {
+  return 'm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function fmtMonto(n) {
+  return Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function nombreCuenta(id) {
+  return cuentas.find(c => c.id === id)?.nombre || '—';
+}
+
+// ---------- Cargar cuentas (para selects y filtros) ----------
+async function cargarCuentas() {
+  const { data, error } = await supabase.from('cuentas').select('*').order('nombre');
+  if (error) { showToast('Error cargando cuentas: ' + error.message, 'error'); return; }
+  cuentas = data || [];
+
+  const selects = [
+    document.getElementById('mCuenta'),
+    document.getElementById('mCuentaDestino'),
+    document.getElementById('filtCuenta')
+  ];
+  for (const sel of selects) {
+    const keepFirst = sel.id === 'filtCuenta';
+    sel.innerHTML = keepFirst ? '<option value="">Todas las cuentas</option>' : '';
+    for (const c of cuentas) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = `${c.emoji || '🏦'} ${c.nombre}`;
+      sel.appendChild(opt);
+    }
+  }
+}
+
+function poblarCategorias() {
+  const selects = [document.getElementById('mCategoria'), document.getElementById('filtCategoria')];
+  for (const sel of selects) {
+    const keepFirst = sel.id === 'filtCategoria';
+    sel.innerHTML = keepFirst ? '<option value="">Todas las categorías</option>' : '';
+    for (const cat of CATEGORIAS) {
+      const opt = document.createElement('option');
+      opt.value = cat;
+      opt.textContent = cat;
+      sel.appendChild(opt);
+    }
+  }
+}
+
+// ---------- Cargar y renderizar movimientos ----------
+async function cargarMovimientos() {
+  const { data, error } = await supabase
+    .from('movimientos')
+    .select('*')
+    .order('fecha', { ascending: false });
+
+  if (error) {
+    document.getElementById('notice').innerHTML =
+      `<div class="alert alert-danger">Error cargando movimientos: ${error.message}</div>`;
+    return;
+  }
+  movimientos = data || [];
+  renderTabla();
+}
+
+function renderTabla() {
+  const fCuenta = document.getElementById('filtCuenta').value;
+  const fCategoria = document.getElementById('filtCategoria').value;
+  const fTipo = document.getElementById('filtTipo').value;
+
+  const filtrados = movimientos.filter(m => {
+    if (fCuenta && m.cuenta_id !== fCuenta && m.cuenta_destino_id !== fCuenta) return false;
+    if (fCategoria && m.categoria !== fCategoria) return false;
+    if (fTipo && m.tipo !== fTipo) return false;
+    return true;
+  });
+
+  const tbody = document.getElementById('tbodyMov');
+  const empty = document.getElementById('emptyState');
+  tbody.innerHTML = '';
+
+  if (!filtrados.length) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+
+  for (const m of filtrados) {
+    const tr = document.createElement('tr');
+    const cuentaTxt = m.tipo === 'transferencia'
+      ? `${nombreCuenta(m.cuenta_id)} → ${nombreCuenta(m.cuenta_destino_id)}`
+      : nombreCuenta(m.cuenta_id);
+    const montoClass = m.tipo === 'ingreso' ? 'amount-income' : (m.tipo === 'egreso' ? 'amount-expense' : '');
+    tr.innerHTML = `
+      <td>${m.fecha}</td>
+      <td><span class="badge badge-${m.tipo}">${m.tipo}</span></td>
+      <td>${cuentaTxt}</td>
+      <td>${m.categoria || '—'}</td>
+      <td>${m.descripcion || ''}</td>
+      <td class="${montoClass}">$${fmtMonto(m.monto)}</td>
+      <td class="admin-only" style="text-align:right;white-space:nowrap;">
+        <button class="btn btn-sm" data-edit="${m.id}">Editar</button>
+        <button class="btn btn-sm btn-danger" data-del="${m.id}">Borrar</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+
+  tbody.querySelectorAll('[data-edit]').forEach(b =>
+    b.addEventListener('click', () => abrirModal(movimientos.find(m => m.id === b.dataset.edit)))
+  );
+  tbody.querySelectorAll('[data-del]').forEach(b =>
+    b.addEventListener('click', () => borrarMovimiento(b.dataset.del))
+  );
+
+  applyReadOnlyMode(profile?.is_admin);
+}
+
+// ---------- Modal ----------
+function toggleCamposPorTipo() {
+  const tipo = document.getElementById('mTipo').value;
+  document.getElementById('mCuentaDestinoWrap').style.display = tipo === 'transferencia' ? 'block' : 'none';
+  document.getElementById('mCategoriaWrap').style.display = tipo === 'transferencia' ? 'none' : 'block';
+}
+
+function abrirModal(mov) {
+  document.getElementById('modalTitle').textContent = mov ? 'Editar movimiento' : 'Nuevo movimiento';
+  document.getElementById('mId').value = mov?.id || '';
+  document.getElementById('mFecha').value = mov?.fecha || new Date().toISOString().slice(0, 10);
+  document.getElementById('mTipo').value = mov?.tipo || 'egreso';
+  document.getElementById('mCuenta').value = mov?.cuenta_id || '';
+  document.getElementById('mCuentaDestino').value = mov?.cuenta_destino_id || '';
+  document.getElementById('mCategoria').value = mov?.categoria || '';
+  document.getElementById('mDescripcion').value = mov?.descripcion || '';
+  document.getElementById('mMonto').value = mov?.monto || '';
+  document.getElementById('mNotas').value = mov?.notas || '';
+  toggleCamposPorTipo();
+  document.getElementById('modalMov').classList.remove('hidden');
+}
+
+function cerrarModal() {
+  document.getElementById('modalMov').classList.add('hidden');
+}
+
+async function guardarMovimiento(e) {
+  e.preventDefault();
+  const tipo = document.getElementById('mTipo').value;
+  const id = document.getElementById('mId').value || uid();
+  const payload = {
+    id,
+    fecha: document.getElementById('mFecha').value,
+    tipo,
+    cuenta_id: document.getElementById('mCuenta').value,
+    cuenta_destino_id: tipo === 'transferencia' ? (document.getElementById('mCuentaDestino').value || null) : null,
+    categoria: tipo === 'transferencia' ? null : (document.getElementById('mCategoria').value || null),
+    descripcion: document.getElementById('mDescripcion').value.trim(),
+    monto: parseFloat(document.getElementById('mMonto').value) || 0,
+    notas: document.getElementById('mNotas').value.trim() || null
+  };
+
+  if (tipo === 'transferencia' && !payload.cuenta_destino_id) {
+    showToast('Elegí una cuenta destino para la transferencia', 'error');
+    return;
+  }
+
+  const { error } = await supabase.from('movimientos').upsert(payload);
+  if (error) { showToast('Error: ' + error.message, 'error'); return; }
+  showToast('Movimiento guardado');
+  cerrarModal();
+  cargarMovimientos();
+}
+
+async function borrarMovimiento(id) {
+  if (!confirm('¿Eliminar este movimiento?')) return;
+  const { error } = await supabase.from('movimientos').delete().eq('id', id);
+  if (error) { showToast('Error: ' + error.message, 'error'); return; }
+  showToast('Movimiento eliminado');
+  cargarMovimientos();
+}
+
+// ---------- Eventos ----------
+document.getElementById('btnNuevo').addEventListener('click', () => abrirModal(null));
+document.getElementById('btnCancelar').addEventListener('click', cerrarModal);
+document.getElementById('formMov').addEventListener('submit', guardarMovimiento);
+document.getElementById('mTipo').addEventListener('change', toggleCamposPorTipo);
+['filtCuenta', 'filtCategoria', 'filtTipo'].forEach(id =>
+  document.getElementById(id).addEventListener('change', renderTabla)
+);
+
+(async () => {
+  const auth = await requireAuth();
+  if (!auth) return;
+  profile = auth.profile;
+  renderUserBadge(document.getElementById('userBadgeContainer'), profile);
+  applyReadOnlyMode(profile?.is_admin);
+  if (!profile?.is_admin) {
+    document.getElementById('notice').innerHTML =
+      `<div class="alert alert-info">👁️ Modo solo lectura: no podés crear, editar ni borrar movimientos.</div>`;
+  }
+  poblarCategorias();
+  await cargarCuentas();
+  await cargarMovimientos();
+})();
+</script>
+
+</body>
+</html>
