@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 Dashboard — Finanzas Personales</title>
+<link rel="stylesheet" href="assets/shared.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  .kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; margin-bottom:20px; }
+  .kpi-card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px; box-shadow:var(--card-shadow); }
+  .kpi-card .label { font-size:.7rem; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin-bottom:6px; font-weight:600; }
+  .kpi-card .value { font-size:1.35rem; font-weight:700; }
+  .kpi-income { color: var(--income); }
+  .kpi-expense { color: var(--expense); }
+  .kpi-neutral { color: var(--accent); }
+  .accounts-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); gap:12px; }
+  .account-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; box-shadow:var(--card-shadow); }
+  .account-card .emoji { font-size:1.4rem; }
+  .account-card .name { font-weight:600; font-size:.85rem; margin:6px 0 3px; }
+  .account-card .saldo { font-family: Georgia, serif; font-size:1.1rem; color:var(--accent); }
+  .section-title { font-size:.75rem; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); font-weight:700; margin:26px 0 12px; }
+  .chart-wrap { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px; box-shadow:var(--card-shadow); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="brand"><a href="index.html" class="back">← Menú</a></div>
+  <div id="userBadgeContainer"></div>
+</div>
+
+<div class="main">
+  <div class="page-header">
+    <div>
+      <h1>📊 Dashboard</h1>
+      <p id="periodoLabel">Resumen del mes actual</p>
+    </div>
+  </div>
+
+  <div id="notice"></div>
+
+  <div class="kpi-grid">
+    <div class="kpi-card">
+      <div class="label">Total en cuentas</div>
+      <div class="value kpi-neutral" id="kpiTotalCuentas">$0,00</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Ingresos del mes</div>
+      <div class="value kpi-income" id="kpiIngresos">$0,00</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Egresos del mes</div>
+      <div class="value kpi-expense" id="kpiEgresos">$0,00</div>
+    </div>
+    <div class="kpi-card">
+      <div class="label">Resultado del mes</div>
+      <div class="value" id="kpiResultado">$0,00</div>
+    </div>
+  </div>
+
+  <div class="section-title">Saldos por cuenta</div>
+  <div class="accounts-grid" id="accountsGrid"></div>
+  <div id="emptyCuentas" class="empty hidden">
+    <div class="empty-icon">🏦</div>
+    <p>Todavía no hay cuentas cargadas. <a href="cuentas.html">Creá la primera</a>.</p>
+  </div>
+
+  <div class="section-title">Gastos del mes por categoría</div>
+  <div class="chart-wrap">
+    <canvas id="chartCategorias" height="90"></canvas>
+    <div id="emptyChart" class="empty hidden">
+      <div class="empty-icon">📈</div>
+      <p>No hay egresos cargados este mes todavía.</p>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module">
+import { supabase, requireAuth, renderUserBadge } from './assets/supabase-client.js';
+
+function fmt(n) {
+  return '$' + Number(n).toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function inicioFinMesActual() {
+  const now = new Date();
+  const inicio = new Date(now.getFullYear(), now.getMonth(), 1);
+  const fin = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  const toISO = d => d.toISOString().slice(0, 10);
+  return { inicio: toISO(inicio), fin: toISO(fin) };
+}
+
+function calcularSaldo(cuenta, movimientos) {
+  let saldo = Number(cuenta.saldo_inicial) || 0;
+  for (const m of movimientos) {
+    const monto = Number(m.monto) || 0;
+    if (m.tipo === 'ingreso' && m.cuenta_id === cuenta.id) saldo += monto;
+    else if (m.tipo === 'egreso' && m.cuenta_id === cuenta.id) saldo -= monto;
+    else if (m.tipo === 'transferencia') {
+      if (m.cuenta_id === cuenta.id) saldo -= monto;
+      if (m.cuenta_destino_id === cuenta.id) saldo += monto;
+    }
+  }
+  return saldo;
+}
+
+async function cargarDashboard() {
+  const [{ data: cuentas, error: e1 }, { data: movimientos, error: e2 }] = await Promise.all([
+    supabase.from('cuentas').select('*').order('nombre'),
+    supabase.from('movimientos').select('*')
+  ]);
+
+  if (e1 || e2) {
+    document.getElementById('notice').innerHTML =
+      `<div class="alert alert-danger">Error cargando datos: ${(e1 || e2).message}</div>`;
+    return;
+  }
+
+  // ---- Saldos por cuenta ----
+  const grid = document.getElementById('accountsGrid');
+  const emptyCuentas = document.getElementById('emptyCuentas');
+  grid.innerHTML = '';
+
+  if (!cuentas.length) {
+    emptyCuentas.classList.remove('hidden');
+  } else {
+    emptyCuentas.classList.add('hidden');
+    let totalGeneral = 0;
+    for (const c of cuentas) {
+      const saldo = calcularSaldo(c, movimientos);
+      totalGeneral += saldo;
+      const card = document.createElement('div');
+      card.className = 'account-card';
+      card.innerHTML = `
+        <div class="emoji">${c.emoji || '🏦'}</div>
+        <div class="name">${c.nombre}</div>
+        <div class="saldo">${fmt(saldo)}</div>
+      `;
+      grid.appendChild(card);
+    }
+    document.getElementById('kpiTotalCuentas').textContent = fmt(totalGeneral);
+  }
+
+  // ---- KPIs del mes ----
+  const { inicio, fin } = inicioFinMesActual();
+  const delMes = movimientos.filter(m => m.fecha >= inicio && m.fecha <= fin);
+
+  const ingresos = delMes.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + Number(m.monto), 0);
+  const egresos = delMes.filter(m => m.tipo === 'egreso').reduce((s, m) => s + Number(m.monto), 0);
+  const resultado = ingresos - egresos;
+
+  document.getElementById('kpiIngresos').textContent = fmt(ingresos);
+  document.getElementById('kpiEgresos').textContent = fmt(egresos);
+  const kpiResultado = document.getElementById('kpiResultado');
+  kpiResultado.textContent = fmt(resultado);
+  kpiResultado.className = 'value ' + (resultado >= 0 ? 'kpi-income' : 'kpi-expense');
+
+  // ---- Gráfico de gastos por categoría (mes actual) ----
+  const porCategoria = {};
+  for (const m of delMes) {
+    if (m.tipo !== 'egreso') continue;
+    const cat = m.categoria || 'Sin categoría';
+    porCategoria[cat] = (porCategoria[cat] || 0) + Number(m.monto);
+  }
+  const labels = Object.keys(porCategoria);
+  const valores = Object.values(porCategoria);
+
+  const canvas = document.getElementById('chartCategorias');
+  const emptyChart = document.getElementById('emptyChart');
+
+  if (!labels.length) {
+    canvas.classList.add('hidden');
+    emptyChart.classList.remove('hidden');
+  } else {
+    canvas.classList.remove('hidden');
+    emptyChart.classList.add('hidden');
+    new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Gastos',
+          data: valores,
+          backgroundColor: '#2563eb'
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+  }
+}
+
+(async () => {
+  const auth = await requireAuth();
+  if (!auth) return;
+  renderUserBadge(document.getElementById('userBadgeContainer'), auth.profile);
+  cargarDashboard();
+})();
+</script>
+
+</body>
+</html>
